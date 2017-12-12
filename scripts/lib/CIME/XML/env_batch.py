@@ -114,7 +114,7 @@ class EnvBatch(EnvBase):
         rev_child = [child for child in orig_group]
         childnodes = []
         for child in reversed(rev_child):
-            childnodes.append(deepcopy(child))
+            childnodes.append(child)
             orig_group.remove(child)
 
         self.root.remove(orig_group)
@@ -129,7 +129,7 @@ class EnvBatch(EnvBase):
                 tnode.set_text("char")
 
             for child in childnodes:
-                new_job_group.append(deepcopy(child))
+                new_job_group.append(child)
 
             self.root.append(new_job_group)
 
@@ -158,9 +158,9 @@ class EnvBatch(EnvBase):
                     batchobj.batch_system_node.remove(oldnode)
 
         if batchobj.batch_system_node is not None:
-            self.root.append(deepcopy(batchobj.batch_system_node))
+            self.root.append(batchobj.batch_system_node)
         if batchobj.machine_node is not None:
-            self.root.append(deepcopy(batchobj.machine_node))
+            self.root.append(batchobj.machine_node)
 
     def make_batch_script(self, input_template, job, case):
         expect(os.path.exists(input_template), "input file '{}' does not exist".format(input_template))

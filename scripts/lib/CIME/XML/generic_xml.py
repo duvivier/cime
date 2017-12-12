@@ -7,13 +7,24 @@ from distutils.spawn import find_executable
 import getpass
 import six
 
+from collections import defaultdict
+
 logger = logging.getLogger(__name__)
+
+_VALIDATE_CACHE = False
 
 class ConstantElement(object):
 
-    def __init__(self, xml_element):
+    def __init__(self, xml_element, parent=None):
         self._xml_element = xml_element
-        self._cache_find  = {}
+        self._cache_find  = defaultdict(lambda: defaultdict(list))
+        self._parent      = parent
+        self._children    = []
+
+        for child_raw in self._xml_element:
+            child = ConstantElement(child_raw, parent=self)
+            self._children.append(child)
+            self._merge_child_to_parent(child)
 
     #
     # const methods
@@ -34,10 +45,6 @@ class ConstantElement(object):
     def tag(self):
         return self._xml_element.tag
 
-    def set_tag(self, value):
-        # Technically not constant, but it won't affect findall cache
-        self._xml_element.tag = value
-
     def set_text(self, text):
         # Technically not constant, but it won't affect findall cache
         self._xml_element.text = text
@@ -56,16 +63,14 @@ class ConstantElement(object):
     def __hash__(self):
         return hash(self._xml_element)
 
-    def findall(self, xpath):
+    def findall_opt(self, nodename, attribute="="):
         """
         Special caching version of findall. This is the entire point of the class
         """
-        if xpath in self._cache_find:
-            return self._cache_find[xpath]
-        else:
-            result = [ConstantElement(item) for item in self._xml_element.findall(xpath)]
-            self._cache_find[xpath] = result
-            return result
+        return self._cache_find[nodename][attribute]
+
+    def findall(self, xpath):
+        return [ConstantElement(item, self) for item in self._xml_element.findall(xpath)]
 
     def find(self, xpath):
         all_matches = self.findall(xpath)
@@ -78,31 +83,76 @@ class ConstantElement(object):
         for child in self._xml_element:
             yield(ConstantElement(child))
 
+
     #
     # non-const methods
     #
 
     def set(self, key, value):
-        self._cache_find = {}
         self._xml_element.set(key, value)
+        self._add_attribute(key, value)
 
     def pop(self, key):
-        self._cache_find = {}
-        return self._xml_element.attrib.pop(key)
+        result = self._xml_element.attrib.pop(key)
+        self._remove_attribute(key, result)
+        return result
 
     def append(self, constant_element):
         expect(isinstance(constant_element, ConstantElement), "Wrong type")
 
-        self._cache_find = {}
-
         self._xml_element.append(constant_element._xml_element) # pylint: disable=protected-access
+        constant_element._parent = self
+
+        self._merge_child_to_parent(constant_element)
 
     def remove(self, constant_element):
         expect(isinstance(constant_element, ConstantElement), "Wrong type")
 
-        self._cache_find = {}
-
         self._xml_element.remove(constant_element._xml_element) # pylint: disable=protected-access
+
+        self._unmerge_child_from_parent(constant_element)
+
+    def set_tag(self, value):
+        self._rename_element(self._xml_element.tag, value)
+        self._xml_element.tag = value
+
+    #
+    # Internal cache mgmt methods
+    #
+
+    def _merge_child_to_parent(self, child):
+        if child.attrib():
+            for attrib_key, attrib_val in child.attrib():
+                self._add_to_cache(attrib_key, attrib_val, child)
+
+        self._add_to_cache("", "", child)
+
+    def _unmerge_child_from_parent(self, child):
+        if child.attrib():
+            for attrib_key, attrib_val in child.attrib():
+                self._remove_from_cache(attrib_key, attrib_val, child)
+
+        self._remove_from_cache("", "", child)
+
+    def _add_to_cache(self, key, value, child):
+        self._cache_find[child.tag()]["{}={}".format(key, value)].append(child)
+        if self._parent is not None:
+            self._parent._add_to_cache(key, value, child)
+
+    def _remove_from_cache(self, key, value, child):
+        self._cache_find[child.tag()]["{}={}".format(key, value)].remove(child)
+        if self._parent is not None:
+            self._parent._remove_from_cache(key, value, child)
+
+    def _add_attribute(self, key, value):
+        self._add_to_cache(key, value, self)
+
+    def _remove_attribute(self, key, value):
+        self._remove_from_cache(key, value, self)
+
+    def _rename_element(self, old, new):
+        self._cache_find[new] = self._cache_find[old]
+        del self._cache_find[old]
 
 class GenericXML(object):
 
@@ -201,7 +251,56 @@ class GenericXML(object):
         #expect(len(nodes) <= 1, "Multiple matches for nodename '{}' and attrs '{}' in file '{}'".format(nodename, attributes, self.filename))
         return nodes[0] if nodes else None
 
-    def get_nodes(self, nodename, attributes=None, root=None, xpath=None):
+    def get_nodes1(self, nodename, attributes=None, root=None, xpath=None):
+        #expect(root is None or isinstance(root, ConstantElement), "Wrong type")
+
+        #logger.debug("(get_nodes) Input values: {}, {}, {}, {}, {}".format(self.__class__.__name__, nodename, attributes, root, xpath))
+
+        if root is None:
+            root = self.root
+        nodes = []
+
+        #expect(attributes is None or xpath is None,
+        #       " Arguments attributes and xpath are exclusive")
+        #if xpath is None:
+        #    xpath = ".//"+nodename
+
+        if attributes:
+            # xml.etree has limited support for xpath and does not allow more than
+            # one attribute in an xpath query so we query seperately for each attribute
+            # and create a result with the intersection of those lists
+
+            for key, value in attributes.items():
+                if value is not None:
+                    #expect(isinstance(value, six.string_types),
+                    #       " Bad value passed for key {}".format(key))
+                    #xpath = ".//{}[@{}=\'{}\']".format(nodename, key, value)
+                    #logger.debug("xpath is {}".format(xpath))
+
+                    #try:
+                    newnodes = root.findall_opt(nodename, "{}={}".format(key, value))
+                    #except Exception as e:
+                    #    expect(False, "Bad xpath search term '{}', error: {}".format(xpath, e))
+
+                    if not nodes:
+                        nodes = newnodes
+                    else:
+                        for node in nodes[:]:
+                            if node not in newnodes:
+                                nodes.remove(node)
+                    if not nodes:
+                        return []
+
+        else:
+            #logger.debug("xpath: {}".format(xpath))
+            nodes = root.findall_opt(nodename)
+
+        #logger.debug("Returning {} nodes ({})".format(len(nodes), nodes))
+
+        return nodes
+
+
+    def get_nodes2(self, nodename, attributes=None, root=None, xpath=None):
         #expect(root is None or isinstance(root, ConstantElement), "Wrong type")
 
         #logger.debug("(get_nodes) Input values: {}, {}, {}, {}, {}".format(self.__class__.__name__, nodename, attributes, root, xpath))
@@ -243,11 +342,17 @@ class GenericXML(object):
 
         else:
             #logger.debug("xpath: {}".format(xpath))
-            nodes = root.findall(xpath)
+            nodes = root.findall(nodename)
 
         #logger.debug("Returning {} nodes ({})".format(len(nodes), nodes))
 
         return nodes
+
+    def get_nodes(self, nodename, attributes=None, root=None, xpath=None):
+        result1 = self.get_nodes1(nodename, attributes, root, xpath)
+        result2 = self.get_nodes2(nodename, attributes, root, xpath)
+        expect(result1 == result2, "bad")
+        return result1
 
     def add_child(self, node, root=None):
         """

@@ -333,7 +333,7 @@ class EntryID(GenericXML):
             content = self.get_element_text(childname, root=node)
             expect(content is not None,"No childname {} for id {}".format(childname, node.get("id")))
             if content == childcontent:
-                elements.append(deepcopy(node))
+                elements.append(node)
 
         return elements
 
@@ -354,7 +354,7 @@ class EntryID(GenericXML):
         # new entries in self - putting the entries as children of
         # group elements in file $file
         for src_node in nodelist:
-            node  = deepcopy(src_node)
+            node  = src_node
             gnode = src_node.find(".//group")
             gname = gnode.text()
             if gname is None:
